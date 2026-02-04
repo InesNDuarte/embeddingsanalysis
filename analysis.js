@@ -222,7 +222,7 @@ function getKNN(index, allEmbeddings, k = 10) {
 }
 
 /**
- * Runs t-SNE and renders the Plotly 3D scatter
+ * Runs t-SNE and renders the Plotly 3D scatter (optimized CPU version)
  */
 async function runVisualization() {
     const modality = document.getElementById('embeddingType').value;
@@ -234,11 +234,12 @@ async function runVisualization() {
     
     const embeddings = globalData.map(d => d[modality]);
     
-    // Initialize t-SNE
+    // Initialize t-SNE with optimized parameters for faster convergence
     const tsne = new tsnejs.tSNE({
         dim: 3,
-        perplexity: Math.min(30, globalData.length - 1),
-        epsilon: 10
+        perplexity: Math.min(20, Math.max(5, globalData.length / 30)), // Adaptive perplexity
+        epsilon: 30, // Increased learning rate for faster convergence
+        metric: 'euclidean'
     });
 
     // Yield to browser before initialization
@@ -252,20 +253,22 @@ async function runVisualization() {
         return;
     }
 
-    setStatus('Phase 5/5 (80%): Running t-SNE iterations - 0%');
+    const maxIterations = 200; // Reduced iterations for faster completion
+    setStatus(`Phase 5/5 (80%): Running t-SNE iterations - 0%`);
     
     // Run t-SNE iterations with periodic browser yields
-    for (let k = 0; k < 500; k++) {
+    // Process 10 iterations per batch to keep UI responsive
+    for (let k = 0; k < maxIterations; k++) {
         tsne.step();
         
-        // Update progress every 50 iterations and yield to browser every 100 iterations
-        if (k % 50 === 0) {
-            const progress = Math.floor((k / 500) * 20) + 80; // 80-100%
-            setStatus(`Phase 5/5 (${progress}%): Running t-SNE iterations - ${k}/500...`);
+        // Update progress every 20 iterations
+        if (k % 20 === 0) {
+            const progress = Math.floor((k / maxIterations) * 20) + 80; // 80-100%
+            setStatus(`Phase 5/5 (${progress}%): Running t-SNE iteration ${k}/${maxIterations}...`);
         }
         
-        if (k % 100 === 0 && k > 0) {
-            // Yield to the browser to keep UI responsive
+        // Yield to browser every 10 iterations for responsiveness
+        if (k % 10 === 0 && k > 0) {
             await new Promise(resolve => requestAnimationFrame(resolve));
         }
     }
