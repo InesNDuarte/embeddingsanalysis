@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multimodal Embedding Explorer</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/science@1.9.3/science.v1.min.js"></script>
+    <script src="https://cdn.rawgit.com/karpathy/tsnejs/master/tsne.js"></script>
+    <style>
+        /* Set base font size for the whole page */
+        body { 
+            font-family: sans-serif; 
+            margin: 20px; 
+            background: #f4f4f9; 
+            font-size: 18px; /* Increased from default */
+        }
+        
+        h2 { font-size: 2.2rem; } /* Make the title larger */
+
+        #controls { 
+            margin-bottom: 20px; 
+            padding: 20px; 
+            background: white; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1); 
+        }
+
+        #status { 
+            color: #555; 
+            font-style: italic; 
+            margin-bottom: 10px; 
+            font-size: 1.1rem; 
+        }
+
+        #plot-container { width: 100%; height: 75vh; background: white; border-radius: 8px; }
+
+        .info-panel { 
+            margin-top: 15px; 
+            font-size: 1.2rem; /* Larger text for results */
+            line-height: 1.6;
+        }
+
+        /* Make dropdown and button significantly larger */
+        select, button { 
+            padding: 12px 20px; 
+            font-size: 1.1rem; 
+            border-radius: 6px; 
+            border: 1px solid #ccc; 
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Multimodal Embedding Explorer</h2>
+    
+    <div id="controls">
+        <label for="embeddingType">Select Modality:</label>
+        <select id="embeddingType">
+            <option value="text_embedding">Text Embeddings</option>
+            <option value="image_embedding">Image Embeddings</option>
+        </select>
+        <button id="processBtn">Generate 3D Projection</button>
+        <p id="status">Waiting for user...</p>
+        <div id="selectionInfo" class="info-panel">
+            <strong>SNN Analysis:</strong> Click two points to find Shared Nearest Neighbors.
+        </div>
+    </div>
+
+    <div id="plot-container"></div>
+
+    <script src="analysis.js"></script>
+</body>
+</html>
