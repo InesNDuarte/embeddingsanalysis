@@ -185,7 +185,105 @@ async function loadData() {
 let data = [];
 
 /**
- * Calculates Euclidean distance between two vectors (optimized)
+ * Simple PCA implementation for dimensionality reduction
+ * @param {Array<Array>} data - Input data (n samples x d features)
+ * @param {number} targetDim - Target dimensionality (default 50)
+ * @returns {Array<Array>} Reduced data (n samples x targetDim)
+ */
+function performPCA(data, targetDim = 50) {
+    if (data.length === 0) return data;
+    
+    const n = data.length;
+    const d = data[0].length;
+    
+    // If data is already lower dimensional than target, return as is
+    if (d <= targetDim) {
+        console.log(`Data dimension ${d} is already <= target ${targetDim}, skipping PCA`);
+        return data;
+    }
+    
+    // 1. Compute mean
+    const mean = new Array(d).fill(0);
+    for (let i = 0; i < n; i++) {
+        for (let j = 0; j < d; j++) {
+            mean[j] += data[i][j];
+        }
+    }
+    for (let j = 0; j < d; j++) mean[j] /= n;
+    
+    // 2. Center data
+    const centered = data.map(row => row.map((val, j) => val - mean[j]));
+    
+    // 3. Compute covariance matrix (simplified: use correlation instead for stability)
+    const cov = Array(d).fill(0).map(() => Array(d).fill(0));
+    for (let i = 0; i < n; i++) {
+        for (let j = 0; j < d; j++) {
+            for (let k = j; k < d; k++) {
+                cov[j][k] += centered[i][j] * centered[i][k];
+                if (j !== k) cov[k][j] = cov[j][k];
+            }
+        }
+    }
+    for (let j = 0; j < d; j++) {
+        for (let k = 0; k < d; k++) {
+            cov[j][k] /= n;
+        }
+    }
+    
+    // 4. Power iteration method to find top eigenvectors
+    const eigenvectors = [];
+    let matrix = cov.map(row => [...row]);
+    
+    for (let eig = 0; eig < Math.min(targetDim, d); eig++) {
+        // Power iteration
+        let v = new Array(d).fill(0);
+        v[eig % d] = 1; // Initialize
+        
+        for (let iter = 0; iter < 20; iter++) {
+            // Multiply matrix by vector
+            const mv = new Array(d).fill(0);
+            for (let i = 0; i < d; i++) {
+                for (let j = 0; j < d; j++) {
+                    mv[i] += matrix[i][j] * v[j];
+                }
+            }
+            
+            // Normalize
+            let norm = Math.sqrt(mv.reduce((sum, x) => sum + x * x, 0));
+            if (norm < 1e-10) break;
+            v = mv.map(x => x / norm);
+        }
+        
+        eigenvectors.push(v);
+        
+        // Deflate matrix
+        for (let i = 0; i < d; i++) {
+            for (let j = 0; j < d; j++) {
+                matrix[i][j] -= v[i] * v[j];
+            }
+        }
+    }
+    
+    // 5. Project data onto eigenvectors
+    const reduced = [];
+    for (let i = 0; i < n; i++) {
+        const row = [];
+        for (let j = 0; j < eigenvectors.length; j++) {
+            let proj = 0;
+            for (let k = 0; k < d; k++) {
+                proj += centered[i][k] * eigenvectors[j][k];
+            }
+            row.push(proj);
+        }
+        reduced.push(row);
+    }
+    
+    console.log(`PCA: reduced ${d} dimensions to ${reduced[0].length}`);
+    return reduced;
+}
+
+/**
+ * Calculates Euclidean distance between two vectors 
  */
 function euclideanDistance(v1, v2) {
     let sum = 0;
@@ -197,7 +295,7 @@ function euclideanDistance(v1, v2) {
 }
 
 /**
- * Finds K nearest neighbors for a given index (optimized)
+ * Finds K nearest neighbors for a given index
  */
 function getKNN(index, allEmbeddings, k = 10) {
     const target = allEmbeddings[index];
@@ -222,7 +320,7 @@ function getKNN(index, allEmbeddings, k = 10) {
 }
 
 /**
- * Runs t-SNE and renders the Plotly 3D scatter (optimized CPU version)
+ * Runs t-SNE with PCA preprocessing and renders the Plotly 3D scatter
  */
 async function runVisualization() {
     const modality = document.getElementById('embeddingType').value;
@@ -230,9 +328,17 @@ async function runVisualization() {
         globalData = await loadData();
     }
 
-    setStatus(`Phase 4/5 (70%): Initializing t-SNE for ${modality}...`);
+    setStatus(`Phase 4/5 (65%): Reducing dimensionality with PCA to 50D...`);
     
-    const embeddings = globalData.map(d => d[modality]);
+    let embeddings = globalData.map(d => d[modality]);
+    
+    // Apply PCA reduction to 50 dimensions
+    embeddings = performPCA(embeddings, 50);
+    
+    // Yield to browser after PCA
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    
+    setStatus(`Phase 4/5 (70%): Initializing t-SNE for ${modality}...`);
     
     // Initialize t-SNE with optimized parameters for faster convergence
     const tsne = new tsnejs.tSNE({
