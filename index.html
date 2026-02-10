@@ -3,39 +3,288 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multimodal Embedding Explorer</title>
+    <title>Cancer Embeddings - GPU t-SNE</title>
+    
+    <!-- External Libraries -->
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/science@1.9.3/science.v1.min.js"></script>
-    <script src="https://cdn.rawgit.com/karpathy/tsnejs/master/tsne.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    
     <style>
-        body { font-family: sans-serif; margin: 20px; background: #f4f4f9; }
-        #controls { margin-bottom: 20px; padding: 15px; background: white; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        #status { color: #555; font-style: italic; margin-bottom: 10px; }
-        #plot-container { width: 100%; height: 70vh; background: white; border-radius: 8px; }
-        .info-panel { margin-top: 10px; font-size: 0.9em; }
-        select, button { padding: 8px; border-radius: 4px; border: 1px solid #ccc; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.8em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .subtitle {
+            color: rgba(255,255,255,0.95);
+            text-align: center;
+            margin-bottom: 25px;
+            font-size: 1.2em;
+        }
+        
+        .gpu-badge {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin: 0 5px;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        
+        #controls { 
+            margin-bottom: 20px; 
+            padding: 30px; 
+            background: white; 
+            border-radius: 15px; 
+            box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+        }
+        
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        
+        label {
+            font-weight: 700;
+            color: #2c3e50;
+            font-size: 1em;
+        }
+        
+        select, button { 
+            padding: 12px 24px; 
+            border-radius: 8px; 
+            border: 2px solid #e0e0e0;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+        
+        select {
+            background: white;
+            cursor: pointer;
+            min-width: 250px;
+            font-weight: 500;
+        }
+        
+        select:hover {
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+        }
+        
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.15);
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 700;
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        button:before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            transition: left 0.5s;
+        }
+        
+        button:hover:before {
+            left: 100%;
+        }
+        
+        button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.6);
+        }
+        
+        button:active {
+            transform: translateY(-1px);
+        }
+        
+        button:disabled {
+            background: linear-gradient(135deg, #ccc 0%, #999 100%);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+        
+        #status { 
+            margin-top: 15px;
+            padding: 15px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-radius: 8px;
+            border-left: 5px solid #667eea;
+            font-size: 0.95em;
+            font-weight: 500;
+            color: #2c3e50;
+        }
+        
+        #status.cached {
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+            border-left-color: #28a745;
+            color: #155724;
+        }
+        
+        .cache-info {
+            display: inline-block;
+            background: rgba(40, 167, 69, 0.1);
+            color: #28a745;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        
+        #plot-container { 
+            width: 100%; 
+            height: 75vh; 
+            background: white; 
+            border-radius: 15px;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+            overflow: hidden;
+        }
+        
+        .info-panel { 
+            margin-top: 20px; 
+            font-size: 0.95em;
+            color: #34495e;
+            line-height: 1.8;
+        }
+        
+        .info-panel strong {
+            color: #2c3e50;
+        }
+        
+        .feature-tag {
+            display: inline-block;
+            background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%);
+            color: #2c3e50;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            margin-right: 8px;
+            margin-top: 10px;
+            font-weight: 600;
+            border: 1px solid rgba(102, 126, 234, 0.2);
+        }
+        
+        .speed-badge {
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+            color: #155724;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 700;
+            margin-left: 10px;
+            border: 1px solid #28a745;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2em;
+            }
+            
+            .control-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            select, button {
+                width: 100%;
+            }
+            
+            #plot-container {
+                height: 60vh;
+            }
+            
+            .gpu-badge {
+                display: block;
+                margin: 5px 0;
+            }
+        }
     </style>
 </head>
 <body>
+    <div class="container">
+        <h1>Cancer Embeddings Explorer</h1>
 
-    <h2>Multimodal Embedding Explorer</h2>
-    
-    <div id="controls">
-        <label for="embeddingType">Select Modality:</label>
-        <select id="embeddingType">
-            <option value="text_embedding">Text Embeddings</option>
-            <option value="image_embedding">Image Embeddings</option>
-        </select>
-        <button id="processBtn">Generate 3D Projection</button>
-        <p id="status">Waiting for user...</p>
-        <div id="selectionInfo" class="info-panel">
-            <strong>SNN Analysis:</strong> Click two points to find Shared Nearest Neighbors.
+        <div id="controls">
+            <div class="control-row">
+                <label for="embeddingType">Embedding type:</label>
+                <select id="embeddingType">
+                    <option value="text_embedding">📝 Text Embeddings (Clinical Notes)</option>
+                    <option value="image_embedding">🔬 Image Embeddings (Medical Imaging)</option>
+                </select>
+                <button id="processBtn">🚀 Generate 3D Projection</button>
+                <button id="clearCacheBtn" style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);">
+                    🗑️ Clear Cache
+                </button>
+            </div>
+            
+            <p id="status">Ready to visualize. Click the button to start GPU-accelerated t-SNE.</p>
+            
+            <div id="selectionInfo" class="info-panel">
+                <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plot to find Shared Nearest Neighbors.
+            </div>
         </div>
+
+        <div id="plot-container"></div>
     </div>
 
-    <div id="plot-container"></div>
-
     <script src="analysis.js"></script>
+    <script>
+        // Wire up clear cache button
+        document.getElementById('clearCacheBtn').addEventListener('click', function() {
+            if (confirm('Clear all cached t-SNE results? You will need to recompute visualizations.')) {
+                window.clearTSNECache();
+            }
+        });
+    </script>
 </body>
 </html>
