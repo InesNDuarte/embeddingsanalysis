@@ -3,12 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cancer Embeddings - GPU t-SNE</title>
+    <title>Cancer Embeddings - Three.js 3D Visualization</title>
     
-    <!-- External Libraries -->
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js"></script>
     
     <style>
         * {
@@ -85,6 +92,25 @@
             border: 2px solid #e0e0e0;
             font-size: 1em;
             transition: all 0.3s ease;
+        }
+        
+        input[type="number"] {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 2px solid #e0e0e0;
+            font-size: 0.95em;
+            transition: all 0.3s ease;
+            width: 80px;
+        }
+        
+        input[type="number"]:hover {
+            border-color: #667eea;
+        }
+        
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.15);
         }
         
         select {
@@ -184,6 +210,54 @@
             overflow: hidden;
         }
         
+        .plots-wrapper {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .plot-section {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+            overflow: hidden;
+        }
+        
+        .plot-section h3 {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            margin: 0;
+            font-size: 1.1em;
+            text-align: center;
+        }
+        
+        .plot-container-individual {
+            width: 100%;
+            height: 65vh;
+            position: relative;
+        }
+        
+        .plot-container-individual canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            z-index: 1000;
+            white-space: nowrap;
+        }
+        
         .info-panel { 
             margin-top: 20px; 
             font-size: 0.95em;
@@ -239,8 +313,12 @@
                 width: 100%;
             }
             
-            #plot-container {
-                height: 60vh;
+            .plots-wrapper {
+                grid-template-columns: 1fr;
+            }
+            
+            .plot-container-individual {
+                height: 50vh;
             }
             
             .gpu-badge {
@@ -253,37 +331,131 @@
 <body>
     <div class="container">
         <h1>Cancer Embeddings Explorer</h1>
-
+        
         <div id="controls">
             <div class="control-row">
-                <label for="embeddingType">Embedding type:</label>
-                <select id="embeddingType">
-                    <option value="text_embedding">📝 Text Embeddings (Clinical Notes)</option>
-                    <option value="image_embedding">🔬 Image Embeddings (Medical Imaging)</option>
-                </select>
-                <button id="processBtn">🚀 Generate 3D Projection</button>
+                <button id="processBtn">🚀 Generate 3D Projections</button>
                 <button id="clearCacheBtn" style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);">
                     🗑️ Clear Cache
                 </button>
             </div>
             
-            <p id="status">Ready to visualize. Click the button to start GPU-accelerated t-SNE.</p>
+            <div class="control-row" style="margin-top: 10px;">
+                <label for="kValue">🔍 Number of Neighbors (k):</label>
+                <input type="number" id="kValue" value="20" min="5" max="100" step="5" 
+                       style="width: 80px; padding: 8px; border-radius: 6px; border: 2px solid #e0e0e0; font-size: 0.95em;">
+                <button id="recalculateBtn" style="background: linear-gradient(135deg, #cf71b7 0%, #dc75a7 100%); padding: 8px 16px; font-size: 0.9em;">
+                    🔄 Recalculate Overlap
+                </button>
+                <span style="color: #666; font-size: 0.9em;">
+                    Click two points to compare their k nearest neighbors
+                </span>
+            </div>
+            
+            <p id="status">Ready to visualize. Click the button to start Python t-SNE for both embeddings.</p>
             
             <div id="selectionInfo" class="info-panel">
-                <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plot to find Shared Nearest Neighbors.
+                <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plots to find Shared Nearest Neighbors.
             </div>
         </div>
 
-        <div id="plot-container"></div>
+        <div class="plots-wrapper">
+            <div class="plot-section">
+                <h3>📝 Text Embeddings (Clinical Notes)</h3>
+                <div id="plot-container-text" class="plot-container-individual"></div>
+            </div>
+            <div class="plot-section">
+                <h3>🔬 Image Embeddings (Medical Imaging)</h3>
+                <div id="plot-container-image" class="plot-container-individual"></div>
+            </div>
+        </div>
     </div>
 
+    <script type="module" src="threejs-renderer.js"></script>
     <script src="analysis.js"></script>
     <script>
+        // Store which plot was clicked last
+        window.activeModality = null;
+        
         // Wire up clear cache button
         document.getElementById('clearCacheBtn').addEventListener('click', function() {
             if (confirm('Clear all cached t-SNE results? You will need to recompute visualizations.')) {
                 window.clearTSNECache();
             }
+        });
+        
+        // Override the process button to generate both plots
+        document.getElementById('processBtn').addEventListener('click', async function() {
+            // Generate both visualizations
+            await runDualVisualization();
+        });
+        
+        // Wire up recalculate button
+        document.getElementById('recalculateBtn').addEventListener('click', function() {
+            // Check if we have the necessary data
+            if (typeof selectedPoints === 'undefined' || !window.currentPositions || !window.activeModality) {
+                alert('⚠️ Please generate 3D projections and select two points first.');
+                return;
+            }
+            
+            if (selectedPoints.length !== 2) {
+                alert('⚠️ Please select exactly two points on the plot before recalculating.');
+                return;
+            }
+            
+            // Get the current k value
+            const k = parseInt(document.getElementById('kValue').value) || 20;
+            
+            // Get the active modality's embeddings
+            const embeddings = globalData.map(d => d[window.activeModality]);
+            
+            // Recalculate KNN with new k value
+            const knn1 = getKNN(selectedPoints[0], embeddings, k);
+            const knn2 = getKNN(selectedPoints[1], embeddings, k);
+            
+            // Find shared neighbors
+            const shared = knn1.filter(idx => knn2.includes(idx));
+            
+            // Find unique neighbors for each point
+            const unique1 = knn1.filter(idx => !knn2.includes(idx));
+            const unique2 = knn2.filter(idx => !knn1.includes(idx));
+            
+            // Re-highlight with new k value on the active plot
+            const containerId = window.activeModality === 'text_embedding' ? 'plot-container-text' : 'plot-container-image';
+            highlightNeighbors(shared, unique1, unique2, selectedPoints, window.currentPositions, containerId);
+            
+            // Update info display
+            const pt1 = globalData[selectedPoints[0]];
+            const pt2 = globalData[selectedPoints[1]];
+            const modalityName = window.activeModality === 'text_embedding' ? 'Text' : 'Image';
+            
+            document.getElementById('selectionInfo').innerHTML = `
+                <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
+                    <strong style="font-size: 1.1em; color: #2c3e50;">📊 Shared Nearest Neighbors Analysis (${modalityName} Embeddings, k=${k})</strong>
+                    <div style="margin-top: 10px;">
+                        <div style="margin: 5px 0;"><strong>Point 1:</strong> ${pt1.id} (${pt1.cancer_type})</div>
+                        <div style="margin: 5px 0;"><strong>Point 2:</strong> ${pt2.id} (${pt2.cancer_type})</div>
+                        <div style="margin: 10px 0; padding: 10px; background: white; border-radius: 6px;">
+                            <strong style="color: #e74c3c;">🔴 Shared Neighbors:</strong> ${shared.length} / ${k} (${((shared.length/k)*100).toFixed(1)}% overlap)
+                        </div>
+                        <div style="display: flex; gap: 10px; margin-top: 10px;">
+                            <div style="flex: 1; padding: 8px; background: rgba(52, 152, 219, 0.1); border-radius: 6px;">
+                                <strong style="color: #3498db;">Point 1 Unique:</strong> ${unique1.length}
+                            </div>
+                            <div style="flex: 1; padding: 8px; background: rgba(155, 89, 182, 0.1); border-radius: 6px;">
+                                <strong style="color: #9b59b6;">Point 2 Unique:</strong> ${unique2.length}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Show success message
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = `✅ Recalculated ${modalityName} with k=${k}. Overlap: ${shared.length}/${k} neighbors (${((shared.length/k)*100).toFixed(1)}%)`;
+            statusEl.style.background = 'linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%)';
+            statusEl.style.borderLeftColor = '#28a745';
+            statusEl.style.color = '#155724';
         });
     </script>
 </body>

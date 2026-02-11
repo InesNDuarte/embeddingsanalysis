@@ -2,6 +2,12 @@
 let globalData = [];
 let selectedPoints = [];
 let cachedEmbeddings = {}; // Cache for t-SNE results
+let currentPositions = null; // Store current t-SNE positions
+let currentModality = null; // Store current modality
+
+// Store positions for both plots
+let textPositions = null;
+let imagePositions = null;
 
 const setStatus = (msg) => {
     document.getElementById('status').innerText = msg;
@@ -41,12 +47,26 @@ function loadTSNEFromCache(cacheKey) {
         
         const cacheData = JSON.parse(cached);
         
+        // Validate cache structure
+        if (!cacheData || !cacheData.embedding) {
+            console.warn('Invalid cache structure, removing...');
+            localStorage.removeItem(cacheKey);
+            return null;
+        }
+        
         // Check if cache is still valid (less than 7 days old)
         const cacheAge = Date.now() - cacheData.timestamp;
         const maxAge = 7 * 24 * 60 * 60 * 1000; // 7 days
         
         if (cacheAge > maxAge) {
             console.log('Cache expired, removing...');
+            localStorage.removeItem(cacheKey);
+            return null;
+        }
+        
+        // Validate embedding is an array
+        if (!Array.isArray(cacheData.embedding)) {
+            console.warn('Cache contains non-array embedding, removing...');
             localStorage.removeItem(cacheKey);
             return null;
         }
@@ -73,6 +93,87 @@ function clearAllCaches() {
     }
     console.log(`Cleared ${cleared} cached t-SNE results`);
     alert(`Cleared ${cleared} cached visualizations`);
+}
+
+// Pyodide initialization
+let pyodide = null;
+
+async function initPyodide() {
+    if (pyodide) return pyodide;
+    
+    console.log('Loading Pyodide...');
+    setStatus('Initializing Python environment (Pyodide)...');
+    
+    pyodide = await loadPyodide();
+    
+    // Load required packages
+    setStatus('Installing Python packages (scikit-learn, numpy)...');
+    await pyodide.loadPackage(['numpy', 'scikit-learn']);
+    
+    console.log('Pyodide ready with scikit-learn');
+    return pyodide;
+}
+
+/**
+ * Run t-SNE using Python's scikit-learn via Pyodide
+ */
+async function runTSNEwithPython(embeddings, dims = 3, perplexity = 30, maxIter = 500) {
+    // Initialize Pyodide if needed
+    await initPyodide();
+    
+    const n = embeddings.length;
+    const d = embeddings[0].length;
+    
+    console.log(`Running Python t-SNE on ${n} samples with ${d} features...`);
+    setStatus(`Phase 4/4 (60%): Running Python t-SNE with scikit-learn...`);
+    
+    // Convert embeddings to a flat array for Python
+    const flatData = embeddings.flat();
+    
+    // Pass data to Python
+    pyodide.globals.set('data_flat', flatData);
+    pyodide.globals.set('n_samples', n);
+    pyodide.globals.set('n_features', d);
+    pyodide.globals.set('n_components', dims);
+    pyodide.globals.set('perplexity_val', perplexity);
+    pyodide.globals.set('n_iter_val', maxIter);
+    
+    // Run t-SNE in Python
+    const result = await pyodide.runPythonAsync(`
+import numpy as np
+from sklearn.manifold import TSNE
+
+# Reshape data
+X = np.array(data_flat).reshape(n_samples, n_features)
+
+# Run t-SNE
+print(f"Running t-SNE: n_samples={n_samples}, n_features={n_features}, n_components={n_components}")
+tsne = TSNE(
+    n_components=n_components,
+    perplexity=perplexity_val,
+    n_iter=n_iter_val,
+    random_state=42,
+    n_jobs=-1,  # Use all CPU cores
+    verbose=1
+)
+
+embedding = tsne.fit_transform(X)
+print(f"t-SNE complete. Output shape: {embedding.shape}")
+
+# Convert to list for JavaScript
+embedding.tolist()
+    `);
+    
+    // Convert Pyodide proxy to JavaScript array if needed
+    let jsResult;
+    if (result && result.toJs) {
+        jsResult = result.toJs();
+    } else {
+        jsResult = result;
+    }
+    
+    console.log('Python t-SNE complete, result type:', typeof jsResult, 'isArray:', Array.isArray(jsResult));
+    return jsResult;
 }
 
 const EMBEDDINGS_ZIP_URL = "https://raw.githubusercontent.com/epiverse/tcgadata/main/TITAN/text_image_embeddings.tsv.zip";
@@ -301,27 +402,29 @@ async function performPCATensorFlow(data, targetDim = 50) {
 }
 
 /**
- * GPU-accelerated distance matrix calculation for t-SNE
+ * Compute distance matrix using CPU (more stable than GPU for large datasets)
  */
-function computeDistanceMatrixGPU(embeddings) {
-    return tf.tidy(() => {
-        const X = tf.tensor2d(embeddings);
-        const n = embeddings.length;
-        
-        // Compute pairwise squared distances efficiently on GPU
-        // ||x_i - x_j||^2 = ||x_i||^2 + ||x_j||^2 - 2*x_i·x_j
-        const sqNorms = X.square().sum(1);
-        const sqNormsCol = sqNorms.expandDims(1);
-        const sqNormsRow = sqNorms.expandDims(0);
-        const dotProduct = X.matMul(X.transpose());
-        
-        const distSq = sqNormsCol.add(sqNormsRow).sub(dotProduct.mul(2));
-        
-        // Clamp to avoid numerical issues
-        const dist = distSq.clipByValue(0, Infinity).sqrt();
-        
-        return dist.arraySync();
-    });
+function computeDistanceMatrixCPU(embeddings) {
+    const n = embeddings.length;
+    const d = embeddings[0].length;
+    const distances = Array(n).fill(0).map(() => Array(n).fill(0));
+    
+    console.log(`Computing ${n}x${n} distance matrix on CPU...`);
+    
+    for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+            let distSq = 0;
+            for (let k = 0; k < d; k++) {
+                const diff = embeddings[i][k] - embeddings[j][k];
+                distSq += diff * diff;
+            }
+            const dist = Math.sqrt(distSq);
+            distances[i][j] = dist;
+            distances[j][i] = dist;
+        }
+    }
+    
+    return distances;
 }
 
 /**
@@ -385,65 +488,7 @@ function computePMatrixGPU(distances, perplexity = 30) {
 }
 
 /**
- * Memory-efficient t-SNE gradient computation
- * Uses smaller GPU operations to prevent context loss
- */
-function computeGradientGPU(Y, P) {
-    const n = Y.length;
-    const dims = Y[0].length;
-    
-    // For large datasets, use CPU to prevent GPU memory issues
-    if (n > 2000) {
-        return computeGradientCPU(Y, P);
-    }
-    
-    return tf.tidy(() => {
-        const Ytensor = tf.tensor2d(Y);
-        const Ptensor = tf.tensor2d(P);
-        
-        // Compute pairwise squared distances
-        const sqNorms = Ytensor.square().sum(1);
-        const sqNormsCol = sqNorms.expandDims(1);
-        const sqNormsRow = sqNorms.expandDims(0);
-        const dotProduct = Ytensor.matMul(Ytensor.transpose());
-        
-        const distSq = sqNormsCol.add(sqNormsRow).sub(dotProduct.mul(2));
-        
-        // Compute Q matrix
-        const Q_unnorm = distSq.add(1).pow(-1);
-        
-        // Zero diagonal
-        const eye = tf.eye(n);
-        const Q_nodiag = Q_unnorm.mul(tf.sub(1, eye));
-        
-        // Normalize Q
-        const sumQ = Q_nodiag.sum().arraySync();
-        const Q = Q_nodiag.div(Math.max(sumQ, 1e-12));
-        
-        // Compute (P - Q)
-        const PQ = Ptensor.sub(Q);
-        const mult = PQ.mul(Q_nodiag);
-        
-        // Compute gradient - extract to CPU early to save GPU memory
-        const multArray = mult.arraySync();
-        const YArray = Y;
-        
-        const gradient = Array(n).fill(0).map(() => Array(dims).fill(0));
-        for (let i = 0; i < n; i++) {
-            for (let j = 0; j < n; j++) {
-                if (i === j) continue;
-                for (let d = 0; d < dims; d++) {
-                    gradient[i][d] += 4 * multArray[i][j] * (YArray[i][d] - YArray[j][d]);
-                }
-            }
-        }
-        
-        return gradient;
-    });
-}
-
-/**
- * CPU-based gradient computation (fallback for large datasets)
+ * CPU-based gradient computation (stable, no WebGL issues)
  */
 function computeGradientCPU(Y, P) {
     const n = Y.length;
@@ -490,7 +535,7 @@ function computeGradientCPU(Y, P) {
 }
 
 /**
- * Fast t-SNE with GPU acceleration and memory management
+ * Fast t-SNE with memory management (uses CPU for stability)
  */
 async function runTSNEwithGPU(embeddings, dims = 3, perplexity = 30, maxIter = 500) {
     const n = embeddings.length;
@@ -500,9 +545,9 @@ async function runTSNEwithGPU(embeddings, dims = 3, perplexity = 30, maxIter = 5
         console.log('GPU memory before t-SNE:', tf.memory());
     }
     
-    console.log('Computing distance matrix on GPU...');
-    setStatus('Phase 4/4 (60%): Computing distances on GPU...');
-    const distances = computeDistanceMatrixGPU(embeddings);
+    console.log('Computing distance matrix on CPU (more stable)...');
+    setStatus('Phase 4/4 (60%): Computing distances...');
+    const distances = computeDistanceMatrixCPU(embeddings);
     
     await new Promise(resolve => requestAnimationFrame(resolve));
     
@@ -526,8 +571,8 @@ async function runTSNEwithGPU(embeddings, dims = 3, perplexity = 30, maxIter = 5
     console.log('Running t-SNE iterations...');
     
     for (let iter = 0; iter < maxIter; iter++) {
-        // Compute gradient (uses GPU for small datasets, CPU for large)
-        const gradient = computeGradientGPU(Y, P);
+        // Compute gradient (CPU-based for stability)
+        const gradient = computeGradientCPU(Y, P);
         
         // Update with momentum
         for (let i = 0; i < n; i++) {
@@ -650,29 +695,23 @@ async function runVisualization() {
     // No cache - compute from scratch
     const statusEl = document.getElementById('status');
     statusEl.className = '';
-    setStatus('Phase 3/4 (55%): Initializing GPU acceleration...');
+    setStatus('Phase 3/4 (55%): Preparing Python environment...');
     
-    try {
-        await tf.ready();
-        const backend = tf.getBackend();
-        console.log(`TensorFlow.js backend: ${backend}`);
-        setStatus(`Phase 3/4 (58%): Using ${backend.toUpperCase()} backend...`);
-    } catch (e) {
-        console.warn('TensorFlow.js not ready:', e);
-    }
+    // Initialize Pyodide first
+    await initPyodide();
     
     await new Promise(resolve => requestAnimationFrame(resolve));
     
     let embeddings = globalData.map(d => d[modality]);
     
-    // GPU-accelerated PCA
-    setStatus(`Phase 3/4 (60%): GPU-accelerated PCA...`);
+    // PCA preprocessing
+    setStatus(`Phase 3/4 (60%): PCA dimensionality reduction to 50D...`);
     embeddings = await performPCATensorFlow(embeddings, 50);
     
     await new Promise(resolve => requestAnimationFrame(resolve));
     
-    // GPU-accelerated t-SNE
-    const embedding = await runTSNEwithGPU(embeddings, 3, perplexity, maxIter);
+    // Python-based t-SNE with scikit-learn
+    const embedding = await runTSNEwithPython(embeddings, 3, perplexity, maxIter);
     
     // Cache the results
     saveTSNEToCache(cacheKey, embedding);
@@ -684,6 +723,17 @@ async function runVisualization() {
 }
 
 function renderPlot(pos, modality) {
+    // Ensure pos is a proper JavaScript array
+    if (!pos || !Array.isArray(pos)) {
+        console.error('Invalid position data:', pos);
+        setStatus('Error: Invalid t-SNE result format');
+        return;
+    }
+    
+    // Save for reset functionality
+    currentPositions = pos;
+    currentModality = modality;
+    
     const x = pos.map(p => p[0]);
     const y = pos.map(p => p[1]);
     const z = pos.map(p => p[2]);
@@ -749,7 +799,13 @@ function renderPlot(pos, modality) {
             }
         },
         hovermode: 'closest',
-        showlegend: false,
+        showlegend: true,
+        legend: {
+            x: 1.02,
+            y: 1,
+            xanchor: 'left',
+            yanchor: 'top'
+        },
         paper_bgcolor: '#ffffff'
     };
 
@@ -759,86 +815,321 @@ function renderPlot(pos, modality) {
         modeBarButtonsToRemove: ['pan3d', 'select3d', 'lasso3d']
     });
 
-    document.getElementById('plot-container').on('plotly_click', function(data) {
+    // Store positions globally for click handler
+    window.currentPositions = pos;
+    
+    const plotDiv = document.getElementById('plot-container');
+    
+    // Remove any existing click handlers to prevent duplicates
+    plotDiv.removeAllListeners('plotly_click');
+    
+    plotDiv.on('plotly_click', function(data) {
         const pn = data.points[0].pointNumber;
-        handleSelection(pn, pos);
+        
+        // Only process clicks on the base trace (original points)
+        if (data.points[0].curveNumber === 0) {
+            handleSelection(pn, window.currentPositions);
+        }
     });
 }
 
 function handleSelection(index, positions) {
+    // If we already have 2 points, clear the old highlights and start fresh
+    if (selectedPoints.length === 2) {
+        selectedPoints = [];
+        
+        // Remove all highlight traces by redrawing just the base trace
+        try {
+            const plotDiv = document.getElementById('plot-container');
+            const baseTrace = plotDiv.data[0]; // Keep the original scatter plot
+            
+            // Temporarily disable click events
+            plotDiv.removeAllListeners('plotly_click');
+            
+            // Redraw with only the base trace
+            Plotly.react('plot-container', [baseTrace], plotDiv.layout).then(() => {
+                // Re-attach click handler after update completes
+                plotDiv.on('plotly_click', function(data) {
+                    const pn = data.points[0].pointNumber;
+                    if (data.points[0].curveNumber === 0) {
+                        handleSelection(pn, window.currentPositions);
+                    }
+                });
+            });
+        } catch (e) {
+            console.warn('Error clearing traces:', e);
+        }
+        
+        document.getElementById('selectionInfo').innerHTML = `
+            <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plot to find Shared Nearest Neighbors.
+            <div>
+                <span class="feature-tag">🎯 Interactive 3D t-SNE</span>
+                <span class="feature-tag">🔍 Customizable k-NN</span>
+                <span class="feature-tag">📊 Cancer Type Clustering</span>
+                <span class="feature-tag">⚡ 5-10x Faster</span>
+                <span class="feature-tag">💾 Cached Results</span>
+            </div>
+        `;
+    }
+    
     selectedPoints.push(index);
-    if (selectedPoints.length > 2) selectedPoints.shift();
 
     if (selectedPoints.length === 2) {
         const modality = document.getElementById('embeddingType').value;
+        const k = parseInt(document.getElementById('kValue').value) || 20;
         const embeddings = globalData.map(d => d[modality]);
         
-        const knn1 = getKNN(selectedPoints[0], embeddings, 20);
-        const knn2 = getKNN(selectedPoints[1], embeddings, 20);
+        // Get k nearest neighbors for each selected point
+        const knn1 = getKNN(selectedPoints[0], embeddings, k);
+        const knn2 = getKNN(selectedPoints[1], embeddings, k);
         
+        // Find shared neighbors (intersection)
         const shared = knn1.filter(idx => knn2.includes(idx));
         
-        highlightShared(shared, selectedPoints, positions);
+        // Find unique neighbors for each point
+        const unique1 = knn1.filter(idx => !knn2.includes(idx));
+        const unique2 = knn2.filter(idx => !knn1.includes(idx));
+        
+        highlightNeighbors(shared, unique1, unique2, selectedPoints, positions);
         
         const pt1 = globalData[selectedPoints[0]];
         const pt2 = globalData[selectedPoints[1]];
         
         document.getElementById('selectionInfo').innerHTML = `
             <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
-                <strong>🎯 Shared Nearest Neighbors:</strong> <span style="color: #667eea; font-size: 1.2em; font-weight: bold;">${shared.length}</span> found<br>
-                <strong>📍 Point 1:</strong> ${pt1.id} <span style="color: #666;">(${pt1.cancer_type})</span><br>
-                <strong>📍 Point 2:</strong> ${pt2.id} <span style="color: #666;">(${pt2.cancer_type})</span>
+                <strong>🎯 k-NN Analysis Results (k=${k}):</strong><br><br>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 10px;">
+                    <div>
+                        <strong>📍 Point 1:</strong> ${pt1.id}<br>
+                        <span style="color: #666;">${pt1.cancer_type}</span><br>
+                        <span style="color: #3498db;">🔵 Unique neighbors: ${unique1.length}</span>
+                    </div>
+                    <div>
+                        <strong>📍 Point 2:</strong> ${pt2.id}<br>
+                        <span style="color: #666;">${pt2.cancer_type}</span><br>
+                        <span style="color: #9b59b6;">🟣 Unique neighbors: ${unique2.length}</span>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 15px; padding: 10px; background: rgba(255,68,68,0.1); border-radius: 6px;">
+                    <strong style="color: #e74c3c;">🔴 Shared Neighbors: ${shared.length}</strong> 
+                    <span style="color: #666;">(${Math.round(shared.length / k * 100)}% overlap)</span>
+                </div>
+                
+                <div style="margin-top: 10px; font-size: 0.85em; color: #666;">
+                    <strong>Legend:</strong> 
+                    🔵 Blue = Point 1 only | 
+                    🟣 Purple = Point 2 only | 
+                    🔴 Red = Shared | 
+                    ⬛ Black = Selected
+                    <br>
+                    <em>Click any point to start a new comparison</em>
+                </div>
+            </div>
+        `;
+    } else if (selectedPoints.length === 1) {
+        const pt1 = globalData[selectedPoints[0]];
+        document.getElementById('selectionInfo').innerHTML = `
+            <div style="background: #f0f0f0; padding: 10px; border-radius: 6px; margin-top: 10px;">
+                <strong>First point selected:</strong> ${pt1.id} (${pt1.cancer_type})<br>
+                <span style="color: #666;">Click another point to find shared neighbors</span>
             </div>
         `;
     }
 }
 
-function highlightShared(sharedIdx, selectedIdx, pos) {
-    const sharedTrace = {
-        x: sharedIdx.map(i => pos[i][0]),
-        y: sharedIdx.map(i => pos[i][1]),
-        z: sharedIdx.map(i => pos[i][2]),
-        mode: 'markers',
-        type: 'scatter3d',
-        name: 'Shared Neighbors',
-        text: sharedIdx.map(i => `<b>Shared</b><br>${globalData[i].id}<br>${globalData[i].cancer_type}`),
-        hovertemplate: '%{text}<extra></extra>',
-        marker: { 
-            size: 7, 
-            color: '#ff4444',
-            symbol: 'circle',
-            line: {
-                color: '#cc0000',
-                width: 2
-            },
-            opacity: 0.9
-        }
-    };
-
-    const selectedTrace = {
-        x: selectedIdx.map(i => pos[i][0]),
-        y: selectedIdx.map(i => pos[i][1]),
-        z: selectedIdx.map(i => pos[i][2]),
-        mode: 'markers',
-        type: 'scatter3d',
-        name: 'Selected Points',
-        text: selectedIdx.map(i => `<b>Selected</b><br>${globalData[i].id}<br>${globalData[i].cancer_type}`),
-        hovertemplate: '%{text}<extra></extra>',
-        marker: { 
-            size: 12, 
-            color: '#2c3e50',
-            symbol: 'diamond',
-            line: {
-                color: '#000000',
-                width: 3
-            }
-        }
-    };
-
-    Plotly.addTraces('plot-container', [sharedTrace, selectedTrace]);
+function highlightNeighbors(sharedIdx, unique1Idx, unique2Idx, selectedIdx, pos, containerId = 'plot-container') {
+    const plot = getThreeJSPlot(containerId);
+    if (!plot) return;
+    
+    // Highlight neighbors with Three.js
+    plot.highlightPoints(sharedIdx, unique1Idx, unique2Idx, selectedIdx);
 }
 
-document.getElementById('processBtn').addEventListener('click', runVisualization);
+// Highlight only the selected points in the other plot (without neighbors)
+function highlightSelectedPointsOnly(selectedIdx, pos, containerId) {
+    const plot = getThreeJSPlot(containerId);
+    if (!plot) return;
+    
+    // Highlight only selected points
+    plot.highlightPoints([], [], [], selectedIdx);
+}
+
+// Dual visualization function for side-by-side plots
+async function runDualVisualization() {
+    if (globalData.length === 0) {
+        globalData = await loadData();
+    }
+
+    // Initialize Pyodide once for both visualizations
+    await initPyodide();
+
+    const perplexity = Math.min(30, Math.max(5, Math.floor(globalData.length / 3)));
+    const maxIter = 500;
+    
+    // Generate both visualizations
+    await Promise.all([
+        runSingleVisualization('text_embedding', 'plot-container-text', perplexity, maxIter),
+        runSingleVisualization('image_embedding', 'plot-container-image', perplexity, maxIter)
+    ]);
+    
+    const statusEl = document.getElementById('status');
+    statusEl.className = 'cached';
+    setStatus("✅ Ready! Both visualizations complete. Click two points in either plot for SNN analysis.");
+}
+
+async function runSingleVisualization(modality, containerId, perplexity, maxIter) {
+    const cacheKey = getCacheKey(modality, globalData.length, perplexity, maxIter);
+    let cachedResult = loadTSNEFromCache(cacheKey);
+    
+    // Validate cached result
+    if (cachedResult && (!Array.isArray(cachedResult) || cachedResult.length === 0)) {
+        console.warn('Invalid cache data detected, clearing...');
+        localStorage.removeItem(cacheKey);
+        cachedResult = null;
+    }
+    
+    let embedding;
+    if (cachedResult) {
+        console.log(`Loaded ${modality} from cache`);
+        embedding = cachedResult;
+    } else {
+        console.log(`Computing ${modality}...`);
+        setStatus(`Computing ${modality === 'text_embedding' ? 'Text' : 'Image'} embeddings...`);
+        
+        let embeddings = globalData.map(d => d[modality]);
+        embeddings = await performPCATensorFlow(embeddings, 50);
+        embedding = await runTSNEwithPython(embeddings, 3, perplexity, maxIter);
+        
+        // Validate before caching
+        if (embedding && Array.isArray(embedding) && embedding.length > 0) {
+            saveTSNEToCache(cacheKey, embedding);
+        } else {
+            console.error('Invalid embedding result from Python:', embedding);
+            setStatus('Error: Invalid t-SNE computation result');
+            return;
+        }
+    }
+    
+    renderPlotToContainer(embedding, modality, containerId);
+}
+
+function renderPlotToContainer(pos, modality, containerId) {
+    // Ensure pos is a proper JavaScript array
+    if (!pos || !Array.isArray(pos)) {
+        console.error('Invalid position data:', pos);
+        setStatus('Error: Invalid t-SNE result format');
+        return;
+    }
+    
+    // Store positions globally
+    if (modality === 'text_embedding') {
+        textPositions = pos;
+    } else {
+        imagePositions = pos;
+    }
+    
+    // Initialize or get Three.js plot
+    let plot = getThreeJSPlot(containerId);
+    if (!plot) {
+        plot = initThreeJSPlot(containerId);
+    }
+    
+    // Render points
+    plot.renderPoints(pos, globalData);
+    
+    // Set click handler
+    plot.onPointClick = (pointIndex) => {
+        window.currentPositions = pos;
+        window.activeModality = modality;
+        handleSelectionForContainer(pointIndex, pos, modality, containerId);
+    };
+}
+
+function handleSelectionForContainer(index, positions, modality, containerId) {
+    if (selectedPoints.length === 2) {
+        selectedPoints = [];
+        
+        // Clear both plots
+        try {
+            ['plot-container-text', 'plot-container-image'].forEach(cid => {
+                const plot = getThreeJSPlot(cid);
+                if (plot) {
+                    plot.clearHighlights();
+                }
+            });
+        } catch (e) {
+            console.warn('Error clearing highlights:', e);
+        }
+        
+        document.getElementById('selectionInfo').innerHTML = `
+            <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plots to find Shared Nearest Neighbors.
+        `;
+    }
+    
+    selectedPoints.push(index);
+
+    if (selectedPoints.length === 2) {
+        const k = parseInt(document.getElementById('kValue').value) || 20;
+        const embeddings = globalData.map(d => d[modality]);
+        
+        const knn1 = getKNN(selectedPoints[0], embeddings, k);
+        const knn2 = getKNN(selectedPoints[1], embeddings, k);
+        
+        const shared = knn1.filter(idx => knn2.includes(idx));
+        const unique1 = knn1.filter(idx => !knn2.includes(idx));
+        const unique2 = knn2.filter(idx => !knn1.includes(idx));
+        
+        // Highlight in the clicked plot with full analysis
+        highlightNeighbors(shared, unique1, unique2, selectedPoints, positions, containerId);
+        
+        // Highlight just the selected points in the other plot
+        const otherContainerId = containerId === 'plot-container-text' ? 'plot-container-image' : 'plot-container-text';
+        const otherPositions = containerId === 'plot-container-text' ? imagePositions : textPositions;
+        
+        if (otherPositions) {
+            highlightSelectedPointsOnly(selectedPoints, otherPositions, otherContainerId);
+        }
+        
+        const pt1 = globalData[selectedPoints[0]];
+        const pt2 = globalData[selectedPoints[1]];
+        const modalityName = modality === 'text_embedding' ? 'Text' : 'Image';
+        
+        document.getElementById('selectionInfo').innerHTML = `
+            <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
+                <strong style="font-size: 1.1em; color: #2c3e50;">📊 SNN Analysis (${modalityName} Embeddings, k=${k})</strong>
+                <div style="margin-top: 10px;">
+                    <div style="margin: 5px 0;"><strong>Point 1:</strong> ${pt1.id} (${pt1.cancer_type})</div>
+                    <div style="margin: 5px 0;"><strong>Point 2:</strong> ${pt2.id} (${pt2.cancer_type})</div>
+                    <div style="margin: 10px 0; padding: 10px; background: white; border-radius: 6px;">
+                        <strong style="color: #ffd700;">⭐ Shared:</strong> ${shared.length}/${k} (${((shared.length/k)*100).toFixed(1)}%)
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-top: 10px;">
+                        <div style="flex: 1; padding: 8px; background: rgba(0, 191, 255, 0.1); border-radius: 6px;">
+                            <strong style="color: #00bfff;">🔵 Point 1 Unique:</strong> ${unique1.length}
+                        </div>
+                        <div style="flex: 1; padding: 8px; background: rgba(255, 0, 255, 0.1); border-radius: 6px;">
+                            <strong style="color: #ff00ff;">🟣 Point 2 Unique:</strong> ${unique2.length}
+                        </div>
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.85em; color: #666;">
+                        <strong>Legend:</strong> 
+                        🟢 Green = Selected Points | 
+                        🔵 Cyan = Point 1 Only | 
+                        🟣 Magenta = Point 2 Only | 
+                        ⭐ Gold = Shared Neighbors
+                        <br>
+                        <em>Click any point to start a new comparison</em>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+}
+
+// Expose functions globally
+window.runDualVisualization = runDualVisualization;
 
 // Expose cache clearing function globally
 window.clearTSNECache = clearAllCaches;
