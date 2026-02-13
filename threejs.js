@@ -27,6 +27,9 @@ class ThreeJSPlot {
         // Create scene
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0xffffff);
+
+        // Ensure container can position legend overlay
+        this.container.style.position = this.container.style.position || 'relative';
         
         // Create camera
         const aspect = this.container.clientWidth / this.container.clientHeight;
@@ -149,6 +152,9 @@ class ThreeJSPlot {
         // Get unique cancer types and generate colors
         const uniqueTypes = [...new Set(data.map(d => d.cancer_type))];
         this.colorMap = this.generateColorPalette(uniqueTypes);
+
+        // Create or update legend overlay for this plot
+        this._updateLegend(uniqueTypes, this.colorMap);
         
         // Normalize positions for better visualization
         const bounds = this.calculateBounds(positions);
@@ -183,6 +189,58 @@ class ThreeJSPlot {
         
         // Center camera on data
         this.centerCamera(bounds, scale);
+    }
+
+    _updateLegend(uniqueTypes, colorMap) {
+        try {
+            let legend = this.container.querySelector('.threejs-legend');
+            if (!legend) {
+                legend = document.createElement('div');
+                legend.className = 'threejs-legend';
+                legend.style.position = 'absolute';
+                legend.style.top = '10px';
+                legend.style.right = '10px';
+                legend.style.background = 'rgba(255, 255, 255, 0.9)';
+                legend.style.border = '1px solid rgba(0,0,0,0.08)';
+                legend.style.padding = '8px';
+                legend.style.borderRadius = '6px';
+                legend.style.maxHeight = '60%';
+                legend.style.overflow = 'auto';
+                legend.style.fontSize = '12px';
+                legend.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+                this.container.appendChild(legend);
+            } else {
+                legend.innerHTML = '';
+            }
+
+            uniqueTypes.forEach(type => {
+                const colorNum = colorMap[type];
+                const hex = '#' + (colorNum.toString(16).padStart(6, '0'));
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.gap = '8px';
+                row.style.marginBottom = '6px';
+
+                const sw = document.createElement('span');
+                sw.style.display = 'inline-block';
+                sw.style.width = '14px';
+                sw.style.height = '14px';
+                sw.style.borderRadius = '3px';
+                sw.style.background = hex;
+                sw.style.border = '1px solid rgba(0,0,0,0.08)';
+
+                const label = document.createElement('span');
+                label.textContent = type;
+                label.style.color = '#333';
+
+                row.appendChild(sw);
+                row.appendChild(label);
+                legend.appendChild(row);
+            });
+        } catch (err) {
+            console.warn('Failed to update ThreeJS legend:', err);
+        }
     }
     
     calculateBounds(positions) {
@@ -257,14 +315,14 @@ class ThreeJSPlot {
         };
         
         // Create highlights with different colors and sizes
-        // Point 1 neighbors only (bright cyan)
+        // Point 1 neighbors only (user-requested pastel cyan: #9fe7ff)
         if (unique1Idx && unique1Idx.length > 0) {
-            createHighlight(unique1Idx, 0x00bfff, 0.03, 'sphere', 1.2);
+            createHighlight(unique1Idx, 0x9fe7ff, 0.03, 'sphere', 1.2);
         }
         
-        // Point 2 neighbors only (bright magenta)
+        // Point 2 neighbors only (user-requested pastel magenta: #ff9fff)
         if (unique2Idx && unique2Idx.length > 0) {
-            createHighlight(unique2Idx, 0xff00ff, 0.03, 'sphere', 1.2);
+            createHighlight(unique2Idx, 0xff9fff, 0.03, 'sphere', 1.2);
         }
         
         // Shared neighbors (bright yellow/gold)

@@ -13,6 +13,9 @@ const setStatus = (msg) => {
     document.getElementById('status').innerText = msg;
 };
 
+// Expose to global window so inline scripts can call it
+window.setStatus = setStatus;
+
 /**
  * Generate a cache key based on data and parameters
  */
@@ -97,21 +100,33 @@ function clearAllCaches() {
 
 // Pyodide initialization
 let pyodide = null;
+let tsnePackagesLoaded = false;
 
 async function initPyodide() {
     if (pyodide) return pyodide;
-    
+
     console.log('Loading Pyodide...');
-    setStatus('Initializing Python environment (Pyodide)...');
-    
+
     pyodide = await loadPyodide();
-    
-    // Load required packages
-    setStatus('Installing Python packages (scikit-learn, numpy)...');
-    await pyodide.loadPackage(['numpy', 'scikit-learn']);
-    
-    console.log('Pyodide ready with scikit-learn');
+
+    // Defer heavy package installation until t-SNE is requested
+    console.log('Pyodide core initialized (package install deferred)');
     return pyodide;
+}
+
+// Install numpy and scikit-learn only when t-SNE is actually requested
+async function ensureTSNEPackages() {
+    if (!pyodide) await initPyodide();
+    if (tsnePackagesLoaded) return;
+
+    try {
+        await pyodide.loadPackage(['numpy', 'scikit-learn']);
+        tsnePackagesLoaded = true;
+        console.log('Pyodide packages for t-SNE installed');
+    } catch (err) {
+        console.error('Failed to load t-SNE Python packages:', err);
+        throw err;
+    }
 }
 
 /**
@@ -120,12 +135,14 @@ async function initPyodide() {
 async function runTSNEwithPython(embeddings, dims = 3, perplexity = 30, maxIter = 500) {
     // Initialize Pyodide if needed
     await initPyodide();
+    // Install heavy Python packages only when t-SNE is actually requested
+    await ensureTSNEPackages();
     
     const n = embeddings.length;
     const d = embeddings[0].length;
     
     console.log(`Running Python t-SNE on ${n} samples with ${d} features...`);
-    setStatus(`Phase 4/4 (60%): Running Python t-SNE with scikit-learn...`);
+    setStatus(`Phase 4/4 (60%): Running t-SNE...`);
     
     // Convert embeddings to a flat array for Python
     const flatData = embeddings.flat();
@@ -222,7 +239,7 @@ async function loadData() {
             throw new Error(`File '${fileName}' not found in the ZIP archive.`);
         }
 
-        setStatus('Phase 2/4 (25%): Extracting and parsing...');
+        setStatus('Phase 2/4 (25%): Extracting and parsing data...');
         const uint8array = await file.async('uint8array');
 
         const decoder = new TextDecoder('utf-8');
@@ -308,7 +325,6 @@ async function loadData() {
 
 /**
  * GPU-accelerated PCA using TensorFlow.js with SVD
- * Fixed: Proper tensor disposal to prevent memory leaks
  */
 async function performPCATensorFlow(data, targetDim = 50) {
     if (data.length === 0) return data;
@@ -402,7 +418,7 @@ async function performPCATensorFlow(data, targetDim = 50) {
 }
 
 /**
- * Compute distance matrix using CPU (more stable than GPU for large datasets)
+ * Compute distance matrix using CPU 
  */
 function computeDistanceMatrixCPU(embeddings) {
     const n = embeddings.length;
@@ -636,18 +652,129 @@ async function runTSNEwithGPU(embeddings, dims = 3, perplexity = 30, maxIter = 5
 }
 
 /**
- * Fast k-NN using original embeddings (not t-SNE output)
+ * Fast k-NN using original embeddings
  */
-function euclideanDistance(v1, v2) {
-    let sum = 0;
-    for (let i = 0; i < v1.length; i++) {
-        const diff = v1[i] - v2[i];
-        sum += diff * diff;
+// Distance metric functions
+const DISTANCE_METRICS = {
+    euclidean: {
+        name: 'Euclidean (L2)',
+        description: 'Standard geometric distance',
+        fn: function(v1, v2) {
+            let sum = 0;
+            for (let i = 0; i < v1.length; i++) {
+                const diff = v1[i] - v2[i];
+                sum += diff * diff;
+            }
+            return Math.sqrt(sum);
+        }
+    },
+    cosine: {
+        name: 'Cosine Distance',
+        description: 'Best for neural embeddings (angle-based)',
+        fn: function(v1, v2) {
+            let dotProduct = 0;
+            let norm1 = 0;
+            let norm2 = 0;
+            
+            for (let i = 0; i < v1.length; i++) {
+                dotProduct += v1[i] * v2[i];
+                norm1 += v1[i] * v1[i];
+                norm2 += v2[i] * v2[i];
+            }
+            
+            norm1 = Math.sqrt(norm1);
+            norm2 = Math.sqrt(norm2);
+            
+            if (norm1 === 0 || norm2 === 0) return 1;
+            
+            const similarity = dotProduct / (norm1 * norm2);
+            return 1 - similarity;
+        }
+    },
+    manhattan: {
+        name: 'Manhattan (L1)',
+        description: 'Sum of absolute differences',
+        fn: function(v1, v2) {
+            let sum = 0;
+            for (let i = 0; i < v1.length; i++) {
+                sum += Math.abs(v1[i] - v2[i]);
+            }
+            return sum;
+        }
+    },
+    chebyshev: {
+        name: 'Chebyshev (L∞)',
+        description: 'Maximum dimension difference',
+        fn: function(v1, v2) {
+            let max = 0;
+            for (let i = 0; i < v1.length; i++) {
+                const diff = Math.abs(v1[i] - v2[i]);
+                if (diff > max) max = diff;
+            }
+            return max;
+        }
+    },
+    correlation: {
+        name: 'Correlation Distance',
+        description: 'Based on Pearson correlation',
+        fn: function(v1, v2) {
+            const n = v1.length;
+            
+            let mean1 = 0, mean2 = 0;
+            for (let i = 0; i < n; i++) {
+                mean1 += v1[i];
+                mean2 += v2[i];
+            }
+            mean1 /= n;
+            mean2 /= n;
+            
+            let numerator = 0;
+            let denom1 = 0;
+            let denom2 = 0;
+            
+            for (let i = 0; i < n; i++) {
+                const diff1 = v1[i] - mean1;
+                const diff2 = v2[i] - mean2;
+                numerator += diff1 * diff2;
+                denom1 += diff1 * diff1;
+                denom2 += diff2 * diff2;
+            }
+            
+            if (denom1 === 0 || denom2 === 0) return 1;
+            
+            const correlation = numerator / Math.sqrt(denom1 * denom2);
+            return 1 - correlation;
+        }
+    },
+    canberra: {
+        name: 'Canberra Distance',
+        description: 'Weighted for sparse data',
+        fn: function(v1, v2) {
+            let sum = 0;
+            for (let i = 0; i < v1.length; i++) {
+                const abs1 = Math.abs(v1[i]);
+                const abs2 = Math.abs(v2[i]);
+                const denominator = abs1 + abs2;
+                
+                if (denominator > 0) {
+                    sum += Math.abs(v1[i] - v2[i]) / denominator;
+                }
+            }
+            return sum;
+        }
     }
-    return Math.sqrt(sum);
+};
+
+function computeDistance(v1, v2, metric = 'euclidean') {
+    const metricInfo = DISTANCE_METRICS[metric];
+    if (!metricInfo) {
+        console.warn(`Unknown metric: ${metric}, falling back to euclidean`);
+        return DISTANCE_METRICS.euclidean.fn(v1, v2);
+    }
+    return metricInfo.fn(v1, v2);
 }
 
-function getKNN(index, allEmbeddings, k = 10) {
+function getKNN(index, allEmbeddings, k = 10, metric = 'euclidean') {
     const target = allEmbeddings[index];
     const distances = [];
     
@@ -655,7 +782,7 @@ function getKNN(index, allEmbeddings, k = 10) {
         if (i === index) continue;
         distances.push({
             index: i,
-            dist: euclideanDistance(target, allEmbeddings[i])
+            dist: computeDistance(target, allEmbeddings[i], metric)
         });
     }
     
@@ -695,7 +822,7 @@ async function runVisualization() {
     // No cache - compute from scratch
     const statusEl = document.getElementById('status');
     statusEl.className = '';
-    setStatus('Phase 3/4 (55%): Preparing Python environment...');
+    setStatus('Phase 3/4 (55%): Preparing environment...');
     
     // Initialize Pyodide first
     await initPyodide();
@@ -739,11 +866,17 @@ function renderPlot(pos, modality) {
     const z = pos.map(p => p[2]);
     
     const uniqueTypes = [...new Set(globalData.map(d => d.cancer_type))];
+    // Palette matches ThreeJS pastel palette used in threejs.js
+    const palette = [
+        '#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
+        '#911eb4', '#46f0f0', '#f032e6', '#bcf60c', '#fabebe',
+        '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000'
+    ];
     const colorMap = {};
     uniqueTypes.forEach((type, i) => {
-        colorMap[type] = i;
+        colorMap[type] = palette[i % palette.length];
     });
-    
+
     const colors = globalData.map(d => colorMap[d.cancer_type]);
     const labels = globalData.map(d => 
         `<b>${d.id}</b><br>Patient: ${d.patient_id}<br>Type: <b>${d.cancer_type}</b>`
@@ -815,6 +948,13 @@ function renderPlot(pos, modality) {
         modeBarButtonsToRemove: ['pan3d', 'select3d', 'lasso3d']
     });
 
+    // Create/update legend for this Plotly container
+    try {
+        createLegendForContainer(document.getElementById('plot-container'), uniqueTypes, colorMap);
+    } catch (err) {
+        console.warn('Failed to create Plotly legend:', err);
+    }
+
     // Store positions globally for click handler
     window.currentPositions = pos;
     
@@ -859,7 +999,7 @@ function handleSelection(index, positions) {
         } catch (e) {
             console.warn('Error clearing traces:', e);
         }
-        
+
         document.getElementById('selectionInfo').innerHTML = `
             <strong>💡 Interactive SNN Analysis:</strong> Click any two points in the 3D plot to find Shared Nearest Neighbors.
             <div>
@@ -870,18 +1010,19 @@ function handleSelection(index, positions) {
                 <span class="feature-tag">💾 Cached Results</span>
             </div>
         `;
-    }
+    }}
     
     selectedPoints.push(index);
-
     if (selectedPoints.length === 2) {
         const modality = document.getElementById('embeddingType').value;
         const k = parseInt(document.getElementById('kValue').value) || 20;
+        const metric = (document.getElementById('distanceMetric') && document.getElementById('distanceMetric').value) || 'euclidean';
+        const metricName = (DISTANCE_METRICS[metric] && DISTANCE_METRICS[metric].name) || metric;
         const embeddings = globalData.map(d => d[modality]);
         
-        // Get k nearest neighbors for each selected point
-        const knn1 = getKNN(selectedPoints[0], embeddings, k);
-        const knn2 = getKNN(selectedPoints[1], embeddings, k);
+        // Get k nearest neighbors for each selected point using selected metric
+        const knn1 = getKNN(selectedPoints[0], embeddings, k, metric);
+        const knn2 = getKNN(selectedPoints[1], embeddings, k, metric);
         
         // Find shared neighbors (intersection)
         const shared = knn1.filter(idx => knn2.includes(idx));
@@ -897,8 +1038,7 @@ function handleSelection(index, positions) {
         
         document.getElementById('selectionInfo').innerHTML = `
             <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
-                <strong>🎯 k-NN Analysis Results (k=${k}):</strong><br><br>
-                
+                <strong>🎯 k-NN Analysis Results (k=${k}, ${metricName}):</strong><br><br>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 10px;">
                     <div>
                         <strong>📍 Point 1:</strong> ${pt1.id}<br>
@@ -928,32 +1068,6 @@ function handleSelection(index, positions) {
                 </div>
             </div>
         `;
-    } else if (selectedPoints.length === 1) {
-        const pt1 = globalData[selectedPoints[0]];
-        document.getElementById('selectionInfo').innerHTML = `
-            <div style="background: #f0f0f0; padding: 10px; border-radius: 6px; margin-top: 10px;">
-                <strong>First point selected:</strong> ${pt1.id} (${pt1.cancer_type})<br>
-                <span style="color: #666;">Click another point to find shared neighbors</span>
-            </div>
-        `;
-    }
-}
-
-function highlightNeighbors(sharedIdx, unique1Idx, unique2Idx, selectedIdx, pos, containerId = 'plot-container') {
-    const plot = getThreeJSPlot(containerId);
-    if (!plot) return;
-    
-    // Highlight neighbors with Three.js
-    plot.highlightPoints(sharedIdx, unique1Idx, unique2Idx, selectedIdx);
-}
-
-// Highlight only the selected points in the other plot (without neighbors)
-function highlightSelectedPointsOnly(selectedIdx, pos, containerId) {
-    const plot = getThreeJSPlot(containerId);
-    if (!plot) return;
-    
-    // Highlight only selected points
-    plot.highlightPoints([], [], [], selectedIdx);
 }
 
 // Dual visualization function for side-by-side plots
@@ -961,17 +1075,17 @@ async function runDualVisualization() {
     if (globalData.length === 0) {
         globalData = await loadData();
     }
-
-    // Initialize Pyodide once for both visualizations
-    await initPyodide();
+    const technique = (document.getElementById('vizTechnique') && document.getElementById('vizTechnique').value) || 'tsne';
 
     const perplexity = Math.min(30, Math.max(5, Math.floor(globalData.length / 3)));
     const maxIter = 500;
-    
-    // Generate both visualizations
+
+    setStatus(`Starting dual visualization (${technique.toUpperCase()})...`);
+
+    // Generate both visualizations using the selected technique
     await Promise.all([
-        runSingleVisualization('text_embedding', 'plot-container-text', perplexity, maxIter),
-        runSingleVisualization('image_embedding', 'plot-container-image', perplexity, maxIter)
+        runSingleVisualizationTechnique('text_embedding', 'plot-container-text', technique),
+        runSingleVisualizationTechnique('image_embedding', 'plot-container-image', technique)
     ]);
     
     const statusEl = document.getElementById('status');
@@ -1014,6 +1128,175 @@ async function runSingleVisualization(modality, containerId, perplexity, maxIter
     
     renderPlotToContainer(embedding, modality, containerId);
 }
+
+/**
+ * Run UMAP in the browser using umap-js
+ */
+
+async function runUMAPwithJS(embeddings, nComponents = 3) {
+    // Ensure UMAP library is available; try UMD script first, then ESM import
+    if (typeof window.UMAP === 'undefined') {
+        // Try UMD script from jsdelivr/unpkg
+        const urls = [
+            'https://cdn.jsdelivr.net/npm/umap-js@1.0.0/dist/umap.min.js',
+            'https://unpkg.com/umap-js@1.0.0/dist/umap.min.js'
+        ];
+        let loaded = false;
+        for (const u of urls) {
+            try {
+                await new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = u;
+                    s.async = true;
+                    s.onload = () => resolve();
+                    s.onerror = () => reject(new Error('Failed to load ' + u));
+                    document.head.appendChild(s);
+                });
+                if (typeof window.UMAP !== 'undefined' || typeof window.umap !== 'undefined') {
+                    window.UMAP = window.UMAP || window.umap;
+                    loaded = true;
+                    break;
+                }
+            } catch (e) {
+                console.warn('UMAP UMD load failed for', u, e);
+            }
+        }
+
+        if (!loaded) {
+            // Try ESM dynamic import (Skypack)
+            try {
+                const mod = await import('https://cdn.skypack.dev/umap-js');
+                window.UMAP = mod.default || mod.UMAP || mod;
+                loaded = !!window.UMAP;
+            } catch (e) {
+                console.warn('UMAP ESM import failed', e);
+            }
+        }
+
+        if (!loaded) {
+            throw new Error('Failed to load umap-js from CDNs');
+        }
+    }
+
+    // umap-js expects data as array of arrays
+    const UMAPClass = window.UMAP.default || window.UMAP.UMAP || window.UMAP;
+    const umapInstance = new (UMAPClass)( { nComponents: nComponents } );
+    const embedding = await umapInstance.fit(embeddings);
+    return embedding.map(row => Array.from(row));
+}
+
+/**
+ * Run a single visualization using selected technique (pca, tsne, umap)
+ * Updates the status banner with phases while running.
+ */
+async function runSingleVisualizationTechnique(modality, containerId, technique) {
+    if (globalData.length === 0) {
+        globalData = await loadData();
+    }
+
+    const statusEl = document.getElementById('status');
+
+    try {
+        // Phase 1: Prepare data
+        statusEl.className = '';
+        setStatus('Phase 1/3: Preparing data (loading embeddings)...');
+        await new Promise(resolve => requestAnimationFrame(resolve));
+
+        let embeddings = globalData.map(d => d[modality]);
+
+        if (technique === 'pca') {
+            // Phase 2: PCA to 3D
+            setStatus('Phase 2/3: Running PCA → 3D...');
+            embeddings = await performPCATensorFlow(embeddings, 3);
+
+            // Phase 3: Rendering
+            setStatus('Phase 3/3: Rendering PCA visualization...');
+            renderPlotToContainer(embeddings, modality, containerId);
+            setStatus('✅ PCA visualization complete');
+            statusEl.className = 'cached';
+            return;
+        }
+
+        // For t-SNE we reduce to 50D first for speed/stability
+        setStatus('Phase 2/3: Running PCA → 50D (preprocessing)...');
+        embeddings = await performPCATensorFlow(embeddings, 50);
+
+        if (technique === 'tsne') {
+            // Phase 3: t-SNE (Python)
+            setStatus('Phase 3/3: Running t-SNE...');
+            const perplexity = Math.min(30, Math.max(5, Math.floor(globalData.length / 3)));
+            const maxIter = 500;
+            const embedding = await runTSNEwithPython(embeddings, 3, perplexity, maxIter);
+            setStatus('✅ t-SNE visualization complete');
+            statusEl.className = 'cached';
+            renderPlotToContainer(embedding, modality, containerId);
+            return;
+        }
+
+        if (technique === 'umap') {
+            // Phase 3: UMAP computation
+            setStatus('Phase 3/3: Running UMAP (in-browser) or loading precomputed...');
+            try {
+                const pre = await fetchumap();
+                let embedding = null;
+
+                if (pre) {
+                    if (pre[modality] && Array.isArray(pre[modality]) && pre[modality].length === globalData.length) {
+                        embedding = pre[modality];
+                    } else if (Array.isArray(pre) && pre.length === globalData.length) {
+                        embedding = pre;
+                    }
+                }
+
+                if (!embedding) {
+                    embedding = await runUMAPwithJS(embeddings, 3);
+                }
+
+                setStatus('✅ UMAP visualization complete');
+                statusEl.className = 'cached';
+                renderPlotToContainer(embedding, modality, containerId);
+                return;
+            } catch (umapErr) {
+                console.error('UMAP error:', umapErr);
+                setStatus('Error during UMAP: ' + (umapErr.message || umapErr));
+                statusEl.className = '';
+                return;
+            }
+        }
+
+        throw new Error('Unknown technique: ' + technique);
+    } catch (err) {
+        console.error('Visualization error:', err);
+        setStatus('Error during visualization: ' + (err.message || err));
+        statusEl.className = '';
+    }
+}
+
+// Convenience: apply selected visualization to both plots (text + image)
+async function applyVisualizationForBoth() {
+    if (globalData.length === 0) {
+        globalData = await loadData();
+    }
+    const technique = (document.getElementById('vizTechnique') && document.getElementById('vizTechnique').value) || 'tsne';
+    const statusEl = document.getElementById('status');
+    setStatus('Starting visualization for both modalities...');
+
+    await Promise.all([
+        runSingleVisualizationTechnique('text_embedding', 'plot-container-text', technique),
+        runSingleVisualizationTechnique('image_embedding', 'plot-container-image', technique)
+    ]).catch(err => {
+        console.error('Error applying visualization to both:', err);
+        setStatus('Error during visualization: ' + (err.message || err));
+        statusEl.className = '';
+    });
+
+    setStatus('✅ Both visualizations complete');
+    statusEl.className = 'cached';
+}
+
+// Expose applyVisualizationForBoth for index.html
+window.applyVisualizationForBoth = applyVisualizationForBoth;
+
 
 function renderPlotToContainer(pos, modality, containerId) {
     // Ensure pos is a proper JavaScript array
@@ -1072,10 +1355,12 @@ function handleSelectionForContainer(index, positions, modality, containerId) {
 
     if (selectedPoints.length === 2) {
         const k = parseInt(document.getElementById('kValue').value) || 20;
+        const metric = (document.getElementById('distanceMetric') && document.getElementById('distanceMetric').value) || 'euclidean';
+        const metricName = (DISTANCE_METRICS[metric] && DISTANCE_METRICS[metric].name) || metric;
         const embeddings = globalData.map(d => d[modality]);
         
-        const knn1 = getKNN(selectedPoints[0], embeddings, k);
-        const knn2 = getKNN(selectedPoints[1], embeddings, k);
+        const knn1 = getKNN(selectedPoints[0], embeddings, k, metric);
+        const knn2 = getKNN(selectedPoints[1], embeddings, k, metric);
         
         const shared = knn1.filter(idx => knn2.includes(idx));
         const unique1 = knn1.filter(idx => !knn2.includes(idx));
@@ -1098,7 +1383,7 @@ function handleSelectionForContainer(index, positions, modality, containerId) {
         
         document.getElementById('selectionInfo').innerHTML = `
             <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
-                <strong style="font-size: 1.1em; color: #2c3e50;">📊 SNN Analysis (${modalityName} Embeddings, k=${k})</strong>
+                <strong style="font-size: 1.1em; color: #2c3e50;">📊 SNN Analysis (${modalityName} Embeddings, k=${k}, ${metricName})</strong>
                 <div style="margin-top: 10px;">
                     <div style="margin: 5px 0;"><strong>Point 1:</strong> ${pt1.id} (${pt1.cancer_type})</div>
                     <div style="margin: 5px 0;"><strong>Point 2:</strong> ${pt2.id} (${pt2.cancer_type})</div>
@@ -1129,7 +1414,97 @@ function handleSelectionForContainer(index, positions, modality, containerId) {
 }
 
 // Expose functions globally
+// Helper: highlight neighbors on a specific ThreeJS plot container
+function highlightNeighbors(sharedIdx, unique1Idx, unique2Idx, selectedIdx, positions, containerId = 'plot-container') {
+    try {
+        const plot = getThreeJSPlot(containerId);
+        if (!plot) {
+            console.warn('No ThreeJS plot found for container:', containerId);
+            return;
+        }
+        // ThreeJSPlot exposes highlightPoints(shared, unique1, unique2, selected)
+        if (typeof plot.highlightPoints === 'function') {
+            plot.highlightPoints(sharedIdx, unique1Idx, unique2Idx, selectedIdx);
+        } else if (typeof plot.highlightNeighbors === 'function') {
+            plot.highlightNeighbors(sharedIdx, unique1Idx, unique2Idx, selectedIdx);
+        } else {
+            console.warn('Plot does not provide highlightPoints/highlightNeighbors API');
+        }
+    } catch (err) {
+        console.error('Error in highlightNeighbors helper:', err);
+    }
+}
+
+// Helper: highlight only selected points (used to sync the other plot)
+function highlightSelectedPointsOnly(selectedIdx, positions, containerId = 'plot-container') {
+    try {
+        const plot = getThreeJSPlot(containerId);
+        if (!plot) return;
+        if (typeof plot.highlightPoints === 'function') {
+            plot.highlightPoints([], [], [], selectedIdx);
+        }
+    } catch (err) {
+        console.error('Error in highlightSelectedPointsOnly:', err);
+    }
+}
+
 window.runDualVisualization = runDualVisualization;
 
 // Expose cache clearing function globally
 window.clearTSNECache = clearAllCaches;
+
+// Create or update a legend overlay for a container element
+function createLegendForContainer(containerEl, uniqueTypes, colorMap) {
+    if (!containerEl) return;
+    try {
+        // Ensure container is positioned
+        containerEl.style.position = containerEl.style.position || 'relative';
+
+        let legend = containerEl.querySelector('.plot-legend');
+        if (!legend) {
+            legend = document.createElement('div');
+            legend.className = 'plot-legend';
+            legend.style.position = 'absolute';
+            legend.style.top = '10px';
+            legend.style.right = '10px';
+            legend.style.background = 'rgba(255,255,255,0.95)';
+            legend.style.border = '1px solid rgba(0,0,0,0.08)';
+            legend.style.padding = '8px';
+            legend.style.borderRadius = '6px';
+            legend.style.maxHeight = '60%';
+            legend.style.overflow = 'auto';
+            legend.style.fontSize = '12px';
+            legend.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+            containerEl.appendChild(legend);
+        } else {
+            legend.innerHTML = '';
+        }
+
+        uniqueTypes.forEach(type => {
+            const hex = colorMap[type] || '#888';
+            const row = document.createElement('div');
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '8px';
+            row.style.marginBottom = '6px';
+
+            const sw = document.createElement('span');
+            sw.style.display = 'inline-block';
+            sw.style.width = '14px';
+            sw.style.height = '14px';
+            sw.style.borderRadius = '3px';
+            sw.style.background = hex;
+            sw.style.border = '1px solid rgba(0,0,0,0.08)';
+
+            const label = document.createElement('span');
+            label.textContent = type;
+            label.style.color = '#333';
+
+            row.appendChild(sw);
+            row.appendChild(label);
+            legend.appendChild(row);
+        });
+    } catch (err) {
+        console.warn('Failed to create legend overlay:', err);
+    }
+}

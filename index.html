@@ -26,7 +26,7 @@
         
         body { 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #87CEFA;
             min-height: 100vh;
             padding: 20px;
         }
@@ -104,7 +104,7 @@
         }
         
         input[type="number"]:hover {
-            border-color: #667eea;
+            border-color: #66b5ea;
         }
         
         input[type="number"]:focus {
@@ -121,7 +121,7 @@
         }
         
         select:hover {
-            border-color: #667eea;
+            border-color: #66acea;
             box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
         }
         
@@ -132,12 +132,12 @@
         }
         
         button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #8fc4ec 0%, #d388db 100%);
             color: white;
             border: none;
             cursor: pointer;
             font-weight: 700;
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+            box-shadow: 0 6px 20px rgba(137, 221, 255, 0.5);
             position: relative;
             overflow: hidden;
         }
@@ -223,9 +223,9 @@
             box-shadow: 0 15px 40px rgba(0,0,0,0.25);
             overflow: hidden;
         }
-        
+
         .plot-section h3 {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #8fc4ec 0%, #d388db 100%);
             color: white;
             padding: 15px;
             margin: 0;
@@ -335,21 +335,46 @@
         <div id="controls">
             <div class="control-row">
                 <button id="processBtn">🚀 Generate 3D Projections</button>
-                <button id="clearCacheBtn" style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);">
+                <button id="clearCacheBtn" style="background: linear-gradient(135deg, #f68585 0%, #f68585 100%);">
                     🗑️ Clear Cache
                 </button>
             </div>
             
             <div class="control-row" style="margin-top: 10px;">
                 <label for="kValue">🔍 Number of Neighbors (k):</label>
-                <input type="number" id="kValue" value="20" min="5" max="100" step="5" 
+                <input type="number" id="kValue" value="20" min="1" max="8373" step="5" 
                        style="width: 80px; padding: 8px; border-radius: 6px; border: 2px solid #e0e0e0; font-size: 0.95em;">
-                <button id="recalculateBtn" style="background: linear-gradient(135deg, #cf71b7 0%, #dc75a7 100%); padding: 8px 16px; font-size: 0.9em;">
+
+                <label for="distanceMetric">📏 Distance Metric:</label>
+                <select id="distanceMetric">
+                    <option value="euclidean">Euclidean (L2) - Standard geometric</option>
+                    <option value="cosine" selected>Cosine - Best for embeddings ⭐</option>
+                    <option value="manhattan">Manhattan (L1) - Robust to outliers</option>
+                    <option value="correlation">Correlation - Linear relationships</option>
+                    <option value="chebyshev">Chebyshev (L∞) - Max difference</option>
+                    <option value="canberra">Canberra - Weighted for sparse data</option>
+                </select>
+
+                <button id="recalculateBtn" style="background: linear-gradient(135deg, #f4b2e3 0%, #f4b2e3 100%); padding: 8px 16px; font-size: 0.9em;">
                     🔄 Recalculate Overlap
                 </button>
                 <span style="color: #666; font-size: 0.9em;">
                     Click two points to compare their k nearest neighbors
                 </span>
+            </div>
+
+            <div class="control-row" style="margin-top: 10px;">
+                <label for="vizTechnique">🧭 Visualization Technique:</label>
+                <select id="vizTechnique">
+                    <option value="pca">PCA (fast, linear)</option>
+                    <option value="tsne" selected>t-SNE (non-linear)</option>
+                    <option value="umap">UMAP (fast non-linear)</option>
+                </select>
+
+                <button id="applyVizBtn" style="background: linear-gradient(135deg, #4caf50 0%, #2e7d32 100%); padding: 8px 16px; font-size: 0.9em; color: white;">
+                    🖼️ Apply Visualization
+                </button>
+                <span style="color: #666; font-size: 0.9em;">Generate visualization from original embeddings</span>
             </div>
             
             <p id="status">Ready to visualize. Click the button to start Python t-SNE for both embeddings.</p>
@@ -371,7 +396,7 @@
         </div>
     </div>
 
-    <script type="module" src="threejs-renderer.js"></script>
+    <script type="module" src="threejs.js"></script>
     <script src="analysis.js"></script>
     <script>
         // Store which plot was clicked last
@@ -379,15 +404,45 @@
         
         // Wire up clear cache button
         document.getElementById('clearCacheBtn').addEventListener('click', function() {
-            if (confirm('Clear all cached t-SNE results? You will need to recompute visualizations.')) {
+            if (!confirm('Clear all cached t-SNE results? You will need to recompute visualizations.')) return;
+            if (typeof window.clearTSNECache === 'function') {
                 window.clearTSNECache();
+            } else if (typeof clearAllCaches === 'function') {
+                // fallback if direct function available
+                clearAllCaches();
+            } else {
+                alert('Cache clearing function is not available yet. Please reload the page.');
             }
         });
         
         // Override the process button to generate both plots
         document.getElementById('processBtn').addEventListener('click', async function() {
-            // Generate both visualizations
-            await runDualVisualization();
+            const btn = document.getElementById('processBtn');
+            try {
+                btn.disabled = true;
+                setStatus('Starting dual visualization...');
+                await window.runDualVisualization();
+            } catch (err) {
+                console.error('Error running dual visualization:', err);
+                setStatus('Error: ' + (err.message || err));
+                alert('Visualization failed: ' + (err.message || err));
+            } finally {
+                btn.disabled = false;
+            }
+        });
+        
+        // Wire up Apply Visualization button (uses selected technique)
+        document.getElementById('applyVizBtn').addEventListener('click', async function() {
+            const statusEl = document.getElementById('status');
+            statusEl.className = '';
+            setTimeout(() => {}, 0);
+            try {
+                console.log('Starting visualization...');
+                await window.applyVisualizationForBoth();
+            } catch (e) {
+                console.error('Apply visualization failed:', e);
+                console.log('Visualization failed: ' + (e.message || e));
+            }
         });
         
         // Wire up recalculate button
@@ -403,15 +458,17 @@
                 return;
             }
             
-            // Get the current k value
+            // Get the current k value and distance metric
             const k = parseInt(document.getElementById('kValue').value) || 20;
+            const metric = (document.getElementById('distanceMetric') && document.getElementById('distanceMetric').value) || 'euclidean';
+            const metricName = (typeof DISTANCE_METRICS !== 'undefined' && DISTANCE_METRICS[metric] && DISTANCE_METRICS[metric].name) ? DISTANCE_METRICS[metric].name : metric;
             
             // Get the active modality's embeddings
             const embeddings = globalData.map(d => d[window.activeModality]);
             
-            // Recalculate KNN with new k value
-            const knn1 = getKNN(selectedPoints[0], embeddings, k);
-            const knn2 = getKNN(selectedPoints[1], embeddings, k);
+            // Recalculate KNN with new k value and selected metric
+            const knn1 = getKNN(selectedPoints[0], embeddings, k, metric);
+            const knn2 = getKNN(selectedPoints[1], embeddings, k, metric);
             
             // Find shared neighbors
             const shared = knn1.filter(idx => knn2.includes(idx));
@@ -431,7 +488,7 @@
             
             document.getElementById('selectionInfo').innerHTML = `
                 <div style="background: linear-gradient(135deg, #e8f4f8 0%, #d4edda 100%); padding: 15px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #667eea;">
-                    <strong style="font-size: 1.1em; color: #2c3e50;">📊 Shared Nearest Neighbors Analysis (${modalityName} Embeddings, k=${k})</strong>
+                    <strong style="font-size: 1.1em; color: #2c3e50;">📊 Shared Nearest Neighbors Analysis (${modalityName} Embeddings, k=${k}, ${metricName})</strong>
                     <div style="margin-top: 10px;">
                         <div style="margin: 5px 0;"><strong>Point 1:</strong> ${pt1.id} (${pt1.cancer_type})</div>
                         <div style="margin: 5px 0;"><strong>Point 2:</strong> ${pt2.id} (${pt2.cancer_type})</div>
@@ -452,7 +509,7 @@
             
             // Show success message
             const statusEl = document.getElementById('status');
-            statusEl.textContent = `✅ Recalculated ${modalityName} with k=${k}. Overlap: ${shared.length}/${k} neighbors (${((shared.length/k)*100).toFixed(1)}%)`;
+            statusEl.textContent = `✅ Recalculated ${modalityName} with k=${k} (${metricName}). Overlap: ${shared.length}/${k} neighbors (${((shared.length/k)*100).toFixed(1)}%)`;
             statusEl.style.background = 'linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%)';
             statusEl.style.borderLeftColor = '#28a745';
             statusEl.style.color = '#155724';
